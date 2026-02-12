@@ -1,0 +1,162 @@
+// =====================================================
+// Investigation: Rap Beef
+// Platform: KC7 Cyber
+// Hypothesis: An attacker delivered ransomware via a 
+//             malicious Excel macro, then used PowerShell
+//             to download and execute the payload.
+// MITRE ATT&CK: T1204.002 (User Execution: Malicious File)
+//               T1059.001 (PowerShell)
+//               T1486 (Data Encrypted for Impact)
+// =====================================================
+
+// ---------------------------------------------
+// 1. Find Excel spawning PowerShell
+//    Goal: Identify initial infection vector
+//    Suspicious: excel.exe spawning powershell.exe
+// ---------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where InitiatingProcessFileName =~ "excel.exe"
+| where FileName =~ "powershell.exe"
+| project Timestamp,
+            DeviceName,
+            InitiatingProcessFileName,
+            InitiatingProcessCommandLine,
+            FileName,
+            ProcessCommandLine
+| order by Timestamp desc
+// Look for encoded commands, download patterns, or suspicious URLs
+
+// ---------------------------------------------
+// 2. Detect PowerShell downloading a file
+//    Goal: Find the download stage of ransomware
+//    Look for: System.Net.WebClient, DownloadFile, 
+//              or Invoke-WebRequest (iwr) with out-file
+// ---------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where FileName =~ "powershell.exe"
+| where ProcessCommandLine contains "DownloadFile" 
+    or ProcessCommandLine contains "Invoke-WebRequest"
+    or ProcessCommandLine contains "iwr"
+    or ProcessCommandLine contains "out-file"
+| project Timestamp,
+            DeviceName,
+            ProcessCommandLine,
+            InitiatingProcessFileName
+| order by Timestamp desc
+
+// ---------------------------------------------
+// 3. Find network connections to suspicious domains
+//    Goal: Identify C2 or staging server
+//    Look for: IPs or domains hosting the payload
+// ---------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where InitiatingProcessFileName =~ "powershell.exe"
+| where RemoteUrl contains "pastebin" 
+    or RemoteUrl contains "github" 
+    or RemoteUrl contains "raw"
+    or RemoteUrl contains "download"
+    or RemoteIP !startswith "10." 
+    and RemoteIP !startswith "192.168."
+    and RemoteIP !startswith "172.16."
+| project Timestamp,
+            DeviceName,
+            RemoteUrl,
+            RemoteIP,
+            RemotePort,
+            InitiatingProcessFileName,
+            InitiatingProcessCommandLine
+| order by Timestamp desc
+
+// ---------------------------------------------
+// 4. Detect file creation events of ransomware
+//    Goal: Identify the ransomware binary written to disk
+//    Look for: .exe, .scr, .dll written by PowerShell
+// ---------------------------------------------
+DeviceFileEvents
+| where Timestamp > ago(7d)
+| where InitiatingProcessFileName =~ "powershell.exe"
+| where FileName endswith ".exe" 
+    or FileName endswith ".scr"
+    or FileName endswith ".dll"
+| project Timestamp,
+            DeviceName,
+            FileName,
+            FolderPath,
+            InitiatingProcessCommandLine,
+            SHA256
+| order by Timestamp desc
+
+// ---------------------------------------------
+// 5. Find ransomware execution and file encryption
+//    Goal: Identify the ransomware process and its behavior
+//    Look for: Process names associated with ransomware
+//              or processes that modify many files rapidly
+// ---------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where FileName contains "wanna" 
+    or FileName contains "ryuk"
+    or FileName contains "locky"
+    or FileName contains "crypt"
+    or ProcessCommandLine contains "encrypt"
+| project Timestamp,
+            DeviceName,
+            FileName,
+            ProcessCommandLine,
+            InitiatingProcessFileName
+| order by Timestamp desc
+
+// ---------------------------------------------
+// 6. Identify ransomware extension appends
+//    Goal: Find evidence of file encryption
+//    Look for: Files being renamed with new extensions
+// ---------------------------------------------
+DeviceFileEvents
+| where Timestamp > ago(7d)
+| where ActionType == "FileRenamed"
+| where PreviousFileName endswith ".docx" 
+    or PreviousFileName endswith ".xlsx"
+    or PreviousFileName endswith ".pptx"
+    or PreviousFileName endswith ".pdf"
+| extend NewExtension = tostring(split(FileName, ".")[-1])
+| where NewExtension in ("encrypted", "wannacry", "locky", "crypt", "ryk")
+| project Timestamp,
+            DeviceName,
+            PreviousFileName,
+            FileName,
+            InitiatingProcessFileName,
+            InitiatingProcessCommandLine
+| order by Timestamp desc
+
+// ---------------------------------------------
+// 7. Check for ransomware notes
+//    Goal: Confirmation of ransomware
+//    Look for: Files named "README", "DECRYPT", "HELP", etc.
+// ---------------------------------------------
+DeviceFileEvents
+| where Timestamp > ago(7d)
+| where FileName contains "README" 
+    or FileName contains "DECRYPT" 
+    or FileName contains "HELP"
+    or FileName contains "RECOVER"
+| project Timestamp,
+            DeviceName,
+            FileName,
+            FolderPath,
+            InitiatingProcessFileName
+| order by Timestamp desc
+
+// =====================================================
+// Summary:
+// This query chain covers the full ransomware attack life cycle:
+// 1. Initial execution via macro
+// 2. PowerShell download cradle
+// 3. Network connection to staging server
+// 4. Payload written to disk
+// 5. Ransomware execution
+// 6. File encryption (renaming)
+// 7. Ransom note creation
+// =====================================================
